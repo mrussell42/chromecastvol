@@ -5,7 +5,13 @@ import time as time
 import json as json
 from struct import unpack
 from select import poll, POLLIN, POLLHUP
+from struct import pack
+import castconf
 
+
+from atom.api import Atom, Typed
+import enaml
+from enaml.qt.qt_application import QtApplication
 
 INIT_MSGS = (b'\x00\x00\x00Y\x08\x00\x12\x08sender-0\x1a\nreceiver-0"(urn:x-cast:com.google.cast.tp.connection(\x002\x13{"type": "CONNECT"}',
              b'\x00\x00\x00g\x08\x00\x12\x08sender-0\x1a\nreceiver-0"#urn:x-cast:com.google.cast.receiver(\x002&{"type": "GET_STATUS", "requestId": 1}'
@@ -25,10 +31,31 @@ STOP_MSGS = {1: b'\x00\x00\x00\x96\x08\x00\x12\x08sender-0\x1a\nreceiver-0"#urn:
              3: b'\x00\x00\x00\x98\x08\x00\x12\x08sender-0\x1a\nreceiver-0"#urn:x-cast:com.google.cast.receiver(\x002W{"type": "STOP", "requestId": $$$, "sessionId": "###"}'}
 
 
+def create_msg(data, namespace='receiver'):
+    """
+
+    """
+
+    target = b"sender-0\x1a\nreceiver-0"
+    namespaces = {'connection': b'"(urn:x-cast:com.google.cast.tp.connection(',
+                  'receiver': b'"#urn:x-cast:com.google.cast.receiver('}
+
+    datastr = json.JSONEncoder().encode(data).encode('utf-8')
+    # Work out the data size and create the appropriate bytes
+    datasize = pack('3b', 0, 50, len(datastr))
+    # Assemble the payload
+    payload = target + namespaces[namespace] + datasize + datastr
+
+    # Create the header bytes based on the payload length
+    hdr = pack('>i2h', len(payload) + 4, 0x800, 0x1208)
+
+    return hdr + payload
+
+
 class Chromecast(object):
     def __init__(self, ip):
         self.ip = ip
-        self.request = 2
+        self.request = 1
         self.vol = 0  # an int between 0 and 100
         self.muted = False
 
@@ -49,11 +76,10 @@ class Chromecast(object):
         self.poller = poll()
         self.poller.register(self.s, POLLIN)
 
-        for msg in INIT_MSGS:
-            # print(msg)
-            # self.s.write(msg)
-            self.write_message(msg)
-        self.check_response(1)
+        conn_msg = create_msg({"type": "CONNECT"}, namespace='connection')
+        self.write_message(conn_msg)
+        self.get_status()
+
         self.connected = True
         print("Connected to CHROMECAST on", self.ip)
 
@@ -78,25 +104,24 @@ class Chromecast(object):
         if volume > 100:
             volume = 100
 
-        volume = "{:1.2f}".format(volume / 100.)
+        voldata = {"type": "SET_VOLUME",
+                   "volume": {"level": volume / 100.},
+                   "requestId": self.request}
 
-        print("Setting Vol to ", volume)
-        msg_len = len(volume) + len(str(self.request))
-        r_volmsg = VOL_MSGS[msg_len]
-        r_volmsg = r_volmsg.replace(b'###', bytes(volume, 'utf-8'))
-        r_volmsg = r_volmsg.replace(b'$$$', bytes(str(self.request), 'utf-8'))
-        r_volmsg = r_volmsg.replace(b'XXCTRLXX', bytes('level', 'utf-8'))
+        msg = create_msg(voldata)
 
-        self.write_message(r_volmsg)
+        self.write_message(msg)
         self.check_response(self.request)
         self.request += 1
 
     def get_status(self):
         print("\n GetStatus")
-        r_statusmsg = STATUS_MSG
-        r_statusmsg = r_statusmsg.replace(b'$$$', bytes(str(self.request), 'utf-8'))
-        self.s.write(r_statusmsg)
-        # self.read_message()
+
+        st_data = {"type": "GET_STATUS",
+                   "requestId": self.request}
+
+        msg = create_msg(st_data)
+        self.write_message(msg)
         self.check_response(self.request)
         self.request += 1
 
@@ -110,23 +135,17 @@ class Chromecast(object):
     def toggle_mute(self):
         print("\n Toggle Mute")
         muted = self.muted
-        if muted:
-            mutestr = "false"
-        else:
-            mutestr = "true"
-        msg_len = len(mutestr) + len(str(self.request))
-        r_volmsg = VOL_MSGS[msg_len]
-        r_volmsg = r_volmsg.replace(b'###', bytes(mutestr, 'utf-8'))
-        r_volmsg = r_volmsg.replace(b'$$$', bytes(str(self.request), 'utf-8'))
-        r_volmsg = r_volmsg.replace(b'XXCTRLXX', bytes('muted', 'utf-8'))
-        print("mut msg", r_volmsg)
 
-        self.write_message(r_volmsg)
+        voldata = {"type": "SET_VOLUME",
+                   "volume": {"muted": not(muted)},
+                   "requestId": self.request}
+
+        msg = create_msg(voldata)
+        print(msg)
+        self.write_message(msg)
         self.check_response(self.request)
 
         self.request += 1
-
-        # self.get_status()
 
     def check_response(self, targetId):
         skt = self.s
@@ -255,3 +274,67 @@ class Chromecast(object):
             print("Error decoding JSON message", js_str)
         print("Reciever Status contained vol", vol)
         return
+
+
+class Chromecast_ctrl(Atom):
+    cast = Typed(Chromecast)
+
+    def inc_vol(self):
+        cast = self.cast
+        current_vol = cast.vol
+        print("current_vol, up", current_vol)
+        cast.set_volume(current_vol + 2)
+
+    def dec_vol(self):
+        cast = self.cast
+        current_vol = cast.vol
+        print("current_vol, dn", current_vol)
+        cast.set_volume(current_vol - 2)
+
+    def mute(self):
+        cast = self.cast
+        cast.toggle_mute()
+
+    def get_status(self):
+        cast = self.cast
+        cast.get_status()
+
+    def pingpong(self):
+        cast = self.cast
+        cast.pingpong()
+
+
+def test_key_vol():
+
+    with enaml.imports():
+        from ccvol import ChromecastView
+
+    cast_params = castconf.CHROMECASTS
+    cast_ips = list(cast_params.keys())
+    cast = Chromecast(cast_ips[0])
+    cast_ctrl = Chromecast_ctrl(cast=cast)
+    app = QtApplication()
+    view = ChromecastView(cast_ctrl=cast_ctrl)
+    view.show()
+
+    app.start()
+
+
+def test_msg_gen():
+    data = {"type": "SET_VOLUME", "volume": {'level': 0.5}, "requestId": 1}
+    msg = create_msg(data, namespace='receiver')
+    print(msg)
+    print(VOL_MSGS[4])
+
+    print(" ")
+    data = {"type": "CONNECT"}
+    msg = create_msg(data, namespace='connection')
+    print(msg)
+    print(INIT_MSGS[0])
+
+
+if __name__ == "__main__":
+
+    # test_get_volume()
+    test_key_vol()
+    # test_msg_gen()

@@ -1,0 +1,33 @@
+from enaml.widgets.api import (
+    Window, Container, PushButton, Label, Field
+)
+from enaml.layout.api import vbox, hbox
+
+
+enamldef ChromecastView(Window):
+    attr cast_ctrl
+    Container:
+        constraints = [vbox(hbox(lab, ip),
+                            hbox(inc, dec),
+                            mute,
+                            stat)]
+        Label: lab:
+            text = "Cast IP"
+        Field: ip:
+            text := cast_ctrl.cast.ip
+
+        PushButton: inc:
+            text = '+'
+            clicked :: cast_ctrl.inc_vol()
+
+        PushButton: dec:
+            text = '-'
+            clicked :: cast_ctrl.dec_vol()
+
+        PushButton: mute:
+            text = "Mute"
+            clicked :: cast_ctrl.mute()
+
+        PushButton: stat:
+            text = "Status"
+            clicked :: cast_ctrl.get_status()
